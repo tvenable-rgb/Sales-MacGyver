@@ -4,7 +4,7 @@ const cors = require('cors');
 const app = express();
 
 app.use(cors({
-  origin: 'https://inquisitive-salmiakki-b1ccf0.netlify.app'
+  origin: origin: 'https://revenue-diagnostic.netlify.app'
 }));
 
 app.use(express.json());
