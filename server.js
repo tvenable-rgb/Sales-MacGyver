@@ -28,24 +28,89 @@ app.post('/api/claude', async (req, res) => {
   }
 });
 
-// ── Website scraper ───────────────────────────────────────────
+// ── Website scraper v2 — structured extraction ───────────────
 app.post('/api/scrape', async (req, res) => {
   try {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'URL required' });
+
     const response = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SalesMacGyver/1.0)' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; SalesMacGyverBot/1.0; +https://salesmacgyver.com)',
+        'Accept': 'text/html,application/xhtml+xml'
+      },
       signal: AbortSignal.timeout(15000)
     });
     const html = await response.text();
-    const text = html
+
+    // Strip script/style/noscript blocks first
+    const cleaned = html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+
+    // Helper to extract content between tags
+    const extractTag = (tag) => {
+      const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'gi');
+      const matches = [];
+      let m;
+      while ((m = re.exec(cleaned)) !== null) {
+        const text = m[1]
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (text && text.length > 2 && text.length < 300) matches.push(text);
+      }
+      return matches;
+    };
+
+    // Helper to extract meta tag content
+    const extractMeta = (name) => {
+      const patterns = [
+        new RegExp(`<meta[^>]+(?:name|property)=["']${name}["'][^>]+content=["']([^"']+)["']`, 'i'),
+        new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["']${name}["']`, 'i')
+      ];
+      for (const re of patterns) {
+        const m = cleaned.match(re);
+        if (m) return m[1].trim();
+      }
+      return null;
+    };
+
+    // Pull structured pieces
+    const title = extractTag('title')[0] || null;
+    const h1s = extractTag('h1');
+    const h2s = extractTag('h2').slice(0, 5);
+    const ogTitle = extractMeta('og:title');
+    const ogDesc = extractMeta('og:description');
+    const metaDesc = extractMeta('description');
+    const twitterTitle = extractMeta('twitter:title');
+    const twitterDesc = extractMeta('twitter:description');
+
+    // Body text excerpt for context
+    const bodyText = cleaned
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-      .slice(0, 4000);
-    res.json({ content: text });
+      .slice(0, 2000);
+
+    // Build tagged content for the prompt
+    const contentBlocks = [
+      title ? `<title>${title}</title>` : '',
+      ogTitle ? `<og:title>${ogTitle}</og:title>` : '',
+      twitterTitle ? `<twitter:title>${twitterTitle}</twitter:title>` : '',
+      h1s.length ? `<h1>${h1s.join(' | ')}</h1>` : '',
+      h2s.length ? `<h2>${h2s.join(' | ')}</h2>` : '',
+      ogDesc ? `<og:description>${ogDesc}</og:description>` : '',
+      metaDesc ? `<meta:description>${metaDesc}</meta:description>` : '',
+      twitterDesc ? `<twitter:description>${twitterDesc}</twitter:description>` : '',
+      `<body>${bodyText}</body>`
+    ].filter(Boolean).join('\n').slice(0, 4000);
+
+    res.json({
+      content: contentBlocks,
+      structured: { title, h1s, h2s, ogTitle, ogDesc, metaDesc, twitterTitle, twitterDesc }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -166,3 +231,4 @@ app.post('/api/log-sheet', async (req, res) => {
 app.listen(process.env.PORT || 3000, () => {
   console.log('Sales MacGyver proxy running');
 });
+
