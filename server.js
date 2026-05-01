@@ -228,7 +228,84 @@ app.post('/api/log-sheet', async (req, res) => {
   }
 });
 
+// ── Save HTML report to Google Drive ──────────────────────────
+app.post('/api/save-to-drive', async (req, res) => {
+  try {
+    const { filename, htmlContent } = req.body;
+    if (!filename || !htmlContent) return res.status(400).json({ error: 'filename and htmlContent required' });
+
+    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+    if (!folderId) throw new Error('GOOGLE_DRIVE_FOLDER_ID env var not set');
+
+    const now = Math.floor(Date.now() / 1000);
+    const { createSign } = require('crypto');
+    const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({
+      iss: serviceAccount.client_email,
+      scope: 'https://www.googleapis.com/auth/drive.file',
+      aud: 'https://oauth2.googleapis.com/token',
+      exp: now + 3600,
+      iat: now
+    })).toString('base64url');
+
+    const sign = createSign('RSA-SHA256');
+    sign.update(`${header}.${payload}`);
+    const signature = sign.sign(serviceAccount.private_key, 'base64url');
+    const jwt = `${header}.${payload}.${signature}`;
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion: jwt
+      })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) throw new Error('Drive token failed: ' + JSON.stringify(tokenData));
+
+    // Multipart upload — metadata + file content in one request
+    const boundary = '-------SalesMacGyverBoundary' + Date.now();
+    const metadata = {
+      name: filename,
+      parents: [folderId],
+      mimeType: 'text/html'
+    };
+    const body =
+      `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      JSON.stringify(metadata) + `\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: text/html\r\n\r\n` +
+      htmlContent + `\r\n` +
+      `--${boundary}--`;
+
+    const uploadRes = await fetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${tokenData.access_token}`,
+          'Content-Type': `multipart/related; boundary=${boundary}`
+        },
+        body
+      }
+    );
+
+    if (!uploadRes.ok) {
+      const errData = await uploadRes.text();
+      throw new Error('Drive upload failed: ' + errData);
+    }
+
+    const fileData = await uploadRes.json();
+    res.json({ success: true, fileId: fileData.id, link: fileData.webViewLink });
+  } catch (err) {
+    console.error('Drive error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log('Sales MacGyver proxy running');
 });
-
